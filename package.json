@@ -8,11 +8,15 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20230419.0",
+    "@types/emailjs-mime-codec": "^2.0.2",
     "@types/imapflow": "^1.0.18",
     "typescript": "^5.0.4",
     "wrangler": "^3.0.0"
   },
   "dependencies": {
+    "cf-imap": "^0.0.9",
+    "emailjs-imap-handler": "^3.0.4",
+    "emailjs-mime-codec": "^2.0.9",
     "imapflow": "^1.0.162"
   }
 }

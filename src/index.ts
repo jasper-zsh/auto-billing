@@ -1,4 +1,4 @@
-import { ImapFlow } from 'imapflow';
+import { ImapClient } from './imap'
 
 export interface Env {
 	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
@@ -23,32 +23,60 @@ export interface Env {
 	IMAP_PORT: number;
 	IMAP_SECURE: boolean;
 	EMAIL_PASS: string;
+
+	auto_billing: KVNamespace
 }
+
+const LAST_SEQ_KEY = 'lastSeq'
 
 export default {
 	// The scheduled handler is invoked at the interval set in our wrangler.toml's
 	// [[triggers]] configuration.
 	async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-		const imapClient = new ImapFlow({
+		const imapClient = new ImapClient({
 			host: env.IMAP_HOST,
 			port: env.IMAP_PORT,
-			secure: env.IMAP_SECURE,
+			tls: env.IMAP_SECURE,
 			auth: {
 				user: env.EMAIL,
 				pass: env.EMAIL_PASS,
 			},
 		});
 		await imapClient.connect();
+		console.log('IMAP connected')
+		await imapClient.mailboxOpen('INBOX')
+		console.log('Inbox selected')
 
-		// A Cron Trigger can make requests to other endpoints on the Internet,
-		// publish to a Queue, query a D1 Database, and much more.
-		//
-		// We'll keep it simple and make an API call to a Cloudflare API:
-		let resp = await fetch('https://api.cloudflare.com/client/v4/ips');
-		let wasSuccessful = resp.ok ? 'success' : 'fail';
+		let lastSeq = await env.auto_billing.get(LAST_SEQ_KEY, 'text');
 
-		// You could store this result in KV, write to a D1 Database, or publish to a Queue.
-		// In this template, we'll just log the result:
-		console.log(`trigger fired at ${event.cron}: ${wasSuccessful}`);
+		let seq = lastSeq ? parseInt(lastSeq) + 1 : 1
+		const messages = imapClient.fetch(`${seq}:*`)
+		for await (let message of messages) {
+			lastSeq = message.seq.toString()
+			if (message.seq < seq) {
+				break
+			}
+			console.log(`${message.seq}: ${message}`)
+		}
+
+		if (lastSeq) {
+			await env.auto_billing.put(LAST_SEQ_KEY, lastSeq)
+		}
+
+		// // A Cron Trigger can make requests to other endpoints on the Internet,
+		// // publish to a Queue, query a D1 Database, and much more.
+		// //
+		// // We'll keep it simple and make an API call to a Cloudflare API:
+		// let resp = await fetch('https://api.cloudflare.com/client/v4/ips');
+		// let wasSuccessful = resp.ok ? 'success' : 'fail';
+
+		// // You could store this result in KV, write to a D1 Database, or publish to a Queue.
+		// // In this template, we'll just log the result:
+		// console.log(`trigger fired at ${event.cron}: ${wasSuccessful}`);
 	},
+	async fetch(event: FetchEvent, env: Env, ctx: ExecutionContext): Promise<Response> {
+		// @ts-expect-error
+		await this.scheduled({}, env, ctx)
+		return new Response('Fetched', { status: 200 })
+	}
 };
