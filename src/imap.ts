@@ -32,9 +32,15 @@ export interface Mailbox {
 	[key: string]: any;
 }
 
+export interface FetchOptions {
+	peek?: boolean;
+	body?: boolean;
+}
+
 export interface FetchMessageObject {
 	seq: number;
 	envelope: Envelope;
+	raw: any;
 }
 
 export interface Envelope {
@@ -193,12 +199,19 @@ export class ImapClient {
 		return metadata;
 	}
 
-	async* fetch(range: string) {
+	async fetchOne(seq: number, options?: FetchOptions) {
+		const messages = this.fetch(`${seq}`, options)
+		for await (let message of messages) {
+			return message
+		}
+	}
+
+	async* fetch(range: string, options?: FetchOptions) {
 		if (!this.socket || !this.reader || !this.writer)
 			throw new Error("Not initialised");
 		if (!this.mailbox)
 			throw new Error("Folder not selected! Before running this function, run the mailboxOpen() function!");
-		let query = `A5 FETCH ${range} ALL\r\n`;
+		let query = `A5 FETCH ${range} (ENVELOPE${options?.body ? ' BODY' : ''})\r\n`;
 		await this.writer.write(query);
 		mainloop:
 		while (true) {
@@ -211,11 +224,16 @@ export class ImapClient {
 						case 'NO':
 							break mainloop
 						case 'BAD':
-							throw new Error("IMAP server returns A5 BAD in fetch function");
+							console.error(query, response)
+							throw new Error("IMAP server returns A5 BAD in fetch function", {
+								cause: { response, query },
+							});
 					}
 					break
 				case '*':
-					const msg: Partial<FetchMessageObject> = {}
+					const msg: Partial<FetchMessageObject> = {
+						raw: command,
+					}
 					msg.seq = parseInt(command.command)
 					if (command.attributes?.length !== 2) {
 						continue
@@ -250,7 +268,6 @@ export class ImapClient {
 						}
 					}
 
-					console.log(JSON.stringify(msg))
 					yield msg as FetchMessageObject
 					break
 			}

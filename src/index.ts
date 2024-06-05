@@ -1,4 +1,4 @@
-import { ImapClient } from './imap'
+import { FetchMessageObject, ImapClient } from './imap'
 
 export interface Env {
 	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
@@ -29,6 +29,11 @@ export interface Env {
 
 const LAST_SEQ_KEY = 'lastSeq'
 
+interface BillingMessageStub {
+	type: 'alipay';
+	message: FetchMessageObject;
+}
+
 export default {
 	// The scheduled handler is invoked at the interval set in our wrangler.toml's
 	// [[triggers]] configuration.
@@ -47,16 +52,28 @@ export default {
 		await imapClient.mailboxOpen('INBOX')
 		console.log('Inbox selected')
 
-		let lastSeq = await env.auto_billing.get(LAST_SEQ_KEY, 'text');
+		// let lastSeq = await env.auto_billing.get(LAST_SEQ_KEY, 'text');
+		let lastSeq = '6600'
 
 		let seq = lastSeq ? parseInt(lastSeq) + 1 : 1
 		const messages = imapClient.fetch(`${seq}:*`)
+		const billingMessages: BillingMessageStub[] = []
 		for await (let message of messages) {
 			lastSeq = message.seq.toString()
 			if (message.seq < seq) {
 				break
 			}
-			console.log(`${message.seq}: ${message}`)
+			if (message.envelope.from?.some(from => from.mailbox === 'service' && from.hostname === 'mail.alipay.com')) {
+				console.log('Got alipay bill')
+				billingMessages.push({
+					type: 'alipay',
+					message,
+				})
+			}
+		}
+		for (const stub of billingMessages) {
+			const msg = await imapClient.fetchOne(stub.message.seq, { body: true, peek: true })
+			console.log(stub.type, JSON.stringify(msg))
 		}
 
 		if (lastSeq) {
