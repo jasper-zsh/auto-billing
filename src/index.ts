@@ -1,4 +1,4 @@
-import { FetchMessageObject, ImapClient } from './imap'
+import { ImapClient, type FetchMessageObject } from './imap'
 
 export interface Env {
 	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
@@ -46,16 +46,18 @@ export default {
 				user: env.EMAIL,
 				pass: env.EMAIL_PASS,
 			},
-		});
+		})
 		await imapClient.connect();
 		console.log('IMAP connected')
-		await imapClient.mailboxOpen('INBOX')
-		console.log('Inbox selected')
 
 		// let lastSeq = await env.auto_billing.get(LAST_SEQ_KEY, 'text');
 		let lastSeq = '6600'
 
 		let seq = lastSeq ? parseInt(lastSeq) + 1 : 1
+
+		await imapClient.mailboxOpen('INBOX')
+		console.log('Inbox selected')
+
 		const messages = imapClient.fetch(`${seq}:*`)
 		const billingMessages: BillingMessageStub[] = []
 		for await (let message of messages) {
@@ -63,17 +65,16 @@ export default {
 			if (message.seq < seq) {
 				break
 			}
-			if (message.envelope.from?.some(from => from.mailbox === 'service' && from.hostname === 'mail.alipay.com')) {
-				console.log('Got alipay bill')
-				billingMessages.push({
-					type: 'alipay',
-					message,
-				})
+			if (message.envelope?.from?.some(from => from.address === 'service@mail.alipay.com')) {
+				console.log('Got alipay bill', message)
+				billingMessages.push({ message, type: 'alipay' })
 			}
 		}
 		for (const stub of billingMessages) {
-			const msg = await imapClient.fetchOne(stub.message.seq, { body: true, peek: true })
-			console.log(stub.type, JSON.stringify(msg))
+			const msg = await imapClient.fetchOne(`${stub.message.seq}`, {
+				bodyParts: ['2']
+			})
+			console.log(msg)
 		}
 
 		if (lastSeq) {

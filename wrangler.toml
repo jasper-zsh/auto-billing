@@ -2,6 +2,7 @@ name = "auto-billing"
 main = "src/index.ts"
 compatibility_date = "2023-05-15"
 node_compat = true
+compatibility_flags = []
 
 kv_namespaces = [
 	{ binding = "auto_billing", id = "558521630b614cc7a5c97e5f73d4a796" }

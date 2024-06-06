@@ -33,8 +33,7 @@ export interface Mailbox {
 }
 
 export interface FetchOptions {
-	peek?: boolean;
-	body?: boolean;
+	bodyParts: string[];
 }
 
 export interface FetchMessageObject {
@@ -57,10 +56,9 @@ export interface Envelope {
 }
 
 export interface Address {
-	name: string;
+	name?: string;
 	// atDomainList: string[];
-	mailbox: string;
-	hostname: string;
+	address?: string;
 }
 
 export class ImapClient {
@@ -83,27 +81,44 @@ export class ImapClient {
 		};
 		if (this.options.tls)
 				options.secureTransport = "starttls";
-		this.socket = await connect({ hostname: this.options.host, port: this.options.port }, options);
+		this.socket = connect({ hostname: this.options.host, port: this.options.port }, options);
 		if (this.options.tls) {
 				const secureSocket = this.socket.startTls();
 				this.socket = secureSocket;
 		}
-		let rest = ''
+		let splitted = false
 		const transformedReceive = new TransformStream<Uint8Array, string>({
 			transform: (chunk, controller) => {
-				const decoded = this.decoder.decode(chunk)
-				const lines = (rest + decoded).split("\r\n")
-				if (decoded.endsWith("\r\n")) {
-					rest = ''
-				} else {
-					const r = lines.pop()
-					if (r) {
-						rest = r
-					}
-				}
-				for (let line of lines) {
-					if (line.length > 0) {
+				let idx
+				let c = chunk
+				while (true) {
+					// console.log('raw', new TextDecoder().decode(c).replace('\r', '\\r').replace('\n', '\\n'))
+					if (splitted && chunk.at(0) === '\n'.charCodeAt(0)) {
+						const line = this.decoder.decode(Uint8Array.from(['\n'.charCodeAt(0)]))
+						console.log(line)
 						controller.enqueue(line)
+						c = c.subarray(1)
+						splitted = false
+					}
+					idx = c.indexOf('\r'.charCodeAt(0))
+					console.log('idx', idx, splitted)
+					if (idx === -1) {
+						this.decoder.decode(c, { stream: true })
+						break
+					}
+					if (idx + 1 < c.length && c[idx + 1] === '\n'.charCodeAt(0)) {
+						const line = this.decoder.decode(c.subarray(0, idx+2))
+						console.log(line)
+						controller.enqueue(line)
+						c = c.subarray(idx + 2)
+					} else {
+						if (idx + 1 === c.length) {
+							splitted = true
+						} else {
+							splitted = false
+						}
+						this.decoder.decode(c, { stream: true })
+						break
 					}
 				}
 			}
@@ -122,6 +137,10 @@ export class ImapClient {
 		const response = (await this.reader.read()).value!;
 		if (!response.startsWith("A001 OK"))
 			throw new Error("IMAP server not responding with an A001 OK. "+response);
+	}
+
+	async getMailboxLock(path: string) {
+		return await this.mailboxOpen(path)
 	}
 
 	async mailboxOpen(path: string) {
@@ -199,8 +218,8 @@ export class ImapClient {
 		return metadata;
 	}
 
-	async fetchOne(seq: number, options?: FetchOptions) {
-		const messages = this.fetch(`${seq}`, options)
+	async fetchOne(path: string, options?: FetchOptions) {
+		const messages = this.fetch(path, options)
 		for await (let message of messages) {
 			return message
 		}
@@ -211,65 +230,77 @@ export class ImapClient {
 			throw new Error("Not initialised");
 		if (!this.mailbox)
 			throw new Error("Folder not selected! Before running this function, run the mailboxOpen() function!");
-		let query = `A5 FETCH ${range} (ENVELOPE${options?.body ? ' BODY' : ''})\r\n`;
+		const attrs: string[] = ['ENVELOPE']
+		const bodyPeeks: string[] = [...options?.bodyParts ?? []]
+		if (bodyPeeks.length > 0) {
+			bodyPeeks.forEach(part =>{
+				attrs.push(`BODY.PEEK[${part}]`)
+			})
+		}
+
+		let query = `A5 FETCH ${range} (${attrs.join(' ')})\r\n`;
 		await this.writer.write(query);
 		mainloop:
 		while (true) {
 			let response = (await this.reader.read()).value!;
-			const command = parseIMAP(response)
-			switch (command.tag) {
-				case 'A5':
-					switch (command.command) {
-						case 'OK':
-						case 'NO':
-							break mainloop
-						case 'BAD':
-							console.error(query, response)
-							throw new Error("IMAP server returns A5 BAD in fetch function", {
-								cause: { response, query },
-							});
-					}
-					break
-				case '*':
-					const msg: Partial<FetchMessageObject> = {
-						raw: command,
-					}
-					msg.seq = parseInt(command.command)
-					if (command.attributes?.length !== 2) {
-						continue
-					}
-					const fetchResult = command.attributes[1] as Element[]
-					const parseAddress = (raw: Element): Address => {
-						const arr = raw as Element[]
-						const address: Partial<Address> = {}
-						address.name = arr[0] ? mimeWordsDecode((arr[0] as SimpleElement).value) : undefined
-						address.mailbox = (arr[2] as SimpleElement).value
-						address.hostname = (arr[3] as SimpleElement).value
-						return address as Address
-					}
-					for (let i = 0; i < fetchResult.length; i += 2) {
-						const key = fetchResult[i] as SimpleElement
-						let value = fetchResult[i + 1] as Element[]
-						switch (key.value) {
-							case 'ENVELOPE':
-								const envelope: Partial<Envelope> = {}
-								envelope.date = new Date((value[0] as SimpleElement).value)
-								envelope.subject = value[1] ? mimeWordsDecode((value[1] as SimpleElement).value) : undefined
-								envelope.from = (value[2] as Element[])?.map(parseAddress)
-								envelope.sender = (value[3] as Element[])?.map(parseAddress)
-								envelope.replyTo = (value[4] as Element[])?.map(parseAddress)
-								envelope.to = (value[5] as Element[])?.map(parseAddress)
-								envelope.cc = (value[6] as Element[])?.map(parseAddress)
-								envelope.bcc = (value[7] as Element[])?.map(parseAddress)
-								envelope.inReplyTo = (value[8] as SimpleElement)?.value
-								envelope.messageId = (value[9] as SimpleElement)?.value
-								msg.envelope = envelope as Envelope
-								break
+			try {
+				const command = parseIMAP(response)
+				switch (command.tag) {
+					case 'A5':
+						switch (command.command) {
+							case 'OK':
+							case 'NO':
+								break mainloop
+							case 'BAD':
+								console.error(query, response)
+								throw new Error("IMAP server returns A5 BAD in fetch function", {
+									cause: { response, query },
+								});
 						}
-					}
+						break
+					case '*':
+						const msg: Partial<FetchMessageObject> = {
+							raw: command,
+						}
+						msg.seq = parseInt(command.command)
+						if (command.attributes?.length !== 2) {
+							continue
+						}
+						const fetchResult = command.attributes[1] as Element[]
+						const parseAddress = (raw: Element): Address => {
+							const arr = raw as Element[]
+							const address: Partial<Address> = {}
+							address.name = arr[0] ? mimeWordsDecode((arr[0] as SimpleElement).value) : undefined
+							address.address = `${(arr[2] as SimpleElement).value}@${(arr[3] as SimpleElement).value}`
+							return address as Address
+						}
+						for (let i = 0; i < fetchResult.length; i += 2) {
+							const key = fetchResult[i] as SimpleElement
+							let value = fetchResult[i + 1] as Element[]
+							switch (key.value) {
+								case 'ENVELOPE':
+									const envelope: Partial<Envelope> = {}
+									envelope.date = new Date((value[0] as SimpleElement).value)
+									envelope.subject = value[1] ? mimeWordsDecode((value[1] as SimpleElement).value) : undefined
+									envelope.from = (value[2] as Element[])?.map(parseAddress)
+									envelope.sender = (value[3] as Element[])?.map(parseAddress)
+									envelope.replyTo = (value[4] as Element[])?.map(parseAddress)
+									envelope.to = (value[5] as Element[])?.map(parseAddress)
+									envelope.cc = (value[6] as Element[])?.map(parseAddress)
+									envelope.bcc = (value[7] as Element[])?.map(parseAddress)
+									envelope.inReplyTo = (value[8] as SimpleElement)?.value
+									envelope.messageId = (value[9] as SimpleElement)?.value
+									msg.envelope = envelope as Envelope
+									break
+							}
+						}
 
-					yield msg as FetchMessageObject
-					break
+						yield msg as FetchMessageObject
+						break
+				}
+			} catch (e) {
+				console.error(response)
+				throw e
 			}
 		}
 	}
